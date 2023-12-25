@@ -1,4 +1,4 @@
-use std::{ collections::HashMap, cmp::Ordering };
+use std::{ collections::HashMap, cmp::Ordering, io::Read };
 
 use crate::{ interface::{ Value, ByteCode }, global::lib_print, parse::ParseProto };
 
@@ -22,10 +22,11 @@ impl ExeState {
     }
 
     /** 虚拟机执行 */
-    pub fn execute(&mut self, proto: &ParseProto) {
+    pub fn execute<R: Read>(&mut self, proto: &ParseProto<R>) {
         /* proto.constants作为常量表存储在proto中而不是虚拟机的global中 */
         /* 虚拟机执行就是解析语法分析产生的字节码 */
         println!("constants is : {:?}", proto.constants);
+        println!("----and----");
         println!("bytecodes is : {:?}", proto.byte_codes);
         println!("------------------------");
         for code in proto.byte_codes.iter() {
@@ -33,15 +34,9 @@ impl ExeState {
             match *code {
                 /* 第一个参数是目标栈索引,第二个参数是全局变量名在全局变量中的索引 */
                 ByteCode::GetGlobal(dst, name) => {
-                    let name = &proto.constants[name as usize];
-                    if let Value::String(key) = name {
-                        /* 获取到函数名之后从装载好的全局函数中寻找相应匹配,如果没有就用nil做默认替代 */
-                        let val = self.globals.get(key).unwrap_or(&Value::Nil).clone();
-                        /* 下一步是装载到调用栈中 */
-                        self.set_stack(dst, val);
-                    } else {
-                        panic!("获取不到全局变量");
-                    }
+                    let name: &str = (&proto.constants[name as usize]).into();
+                    let val = self.globals.get(name).unwrap_or(&Value::Nil).clone();
+                    self.set_stack(dst.into(), val);
                 }
                 /*  函数执行,Call */
                 ByteCode::Call(func, _) => {
@@ -78,39 +73,23 @@ impl ExeState {
                 }
                 /* 设置全局变量 */
                 ByteCode::SetGlobal(name, src) => {
-                    /* locals的数据最终去到了constants中 */
-                    let name = proto.constants[name as usize].clone();
-                    if let Value::String(key) = name {
-                        let value = self.stack[src as usize].clone();
-                        self.globals.insert(key, value);
-                    } else {
-                        panic!("错误的语法解析!");
-                    }
+                    /* 将Value里面的数据转化成 &str */
+                    let name = (&proto.constants[name as usize]).into();
+                    let value = self.stack[src as usize].clone();
+                    self.globals.insert(name, value);
                 }
                 /* 设置全局常量 : 区别是数据都从constants获取 */
                 ByteCode::SetGlobalConst(name, src) => {
-                    let name = proto.constants[name as usize].clone();
-                    if let Value::String(key) = name {
-                        let value = proto.constants[src as usize].clone();
-                        self.globals.insert(key, value);
-                    } else {
-                        panic!("invalid global key: {name:?}");
-                    }
+                    let name = (&proto.constants[name as usize]).into();
+                    let value = proto.constants[src as usize].clone();
+                    self.globals.insert(name, value);
                 }
-                /* 获取二段全局常量 */
+                /* 设置全局字面量 :  */
                 ByteCode::SetGlobalGlobal(name, src) => {
-                    let name = proto.constants[name as usize].clone();
-                    if let Value::String(key) = name {
-                        let src = &proto.constants[src as usize];
-                        if let Value::String(src) = src {
-                            let value = self.globals.get(src).unwrap_or(&Value::Nil).clone();
-                            self.globals.insert(key, value);
-                        } else {
-                            panic!("invalid global key: {src:?}");
-                        }
-                    } else {
-                        panic!("invalid global key: {name:?}");
-                    }
+                    let name = (&proto.constants[name as usize]).into();
+                    let src: &str = (&proto.constants[src as usize]).into();
+                    let value = self.globals.get(src).unwrap_or(&Value::Nil).clone();
+                    self.globals.insert(name, value);
                 }
                 // _ => panic!("暂时不支持更多字节码"),
             }
@@ -124,7 +103,7 @@ impl ExeState {
             Ordering::Less => {
                 self.stack[dst] = v;
             }
-            Ordering::Greater => panic!("fail in set_stack"),
+            Ordering::Greater => panic!("栈溢出异常"),
         }
     }
 }

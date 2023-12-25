@@ -1,19 +1,19 @@
-use std::fs::File;
+use std::io::Read;
 
 use crate::{ interface::{ Value, ByteCode, Token }, lex::Lex };
 
 /** ### Lua解释器 */
 
 /** 语法解析模块 : 将Token解析成相应的bytecode */
-pub struct ParseProto {
+pub struct ParseProto<R: Read> {
     pub constants: Vec<Value> /* 常量表 */,
     pub byte_codes: Vec<ByteCode> /* 字节码表,表示各个模块的调用情况 */,
     locals: Vec<String> /* 变量表,所有进过 local 定义的变量会在里面 */,
-    lex: Lex /* 词法解析器本器 */,
+    lex: Lex<R> /* 词法解析器本器 */,
 }
-impl ParseProto {
+impl<R: Read> ParseProto<R> {
     /** 语法解析 */
-    pub fn load(file: File) -> ParseProto {
+    pub fn load(file: R) -> ParseProto<R> {
         let mut proto = ParseProto {
             constants: Vec::new(),
             byte_codes: Vec::new(),
@@ -66,12 +66,12 @@ impl ParseProto {
             }
             Token::String(str) => {
                 /* 字符串常量 : 进行直接赋值即可 */
-                let code = self.load_const(iarg as u8, Value::String(str));
+                let code = self.load_const(iarg as u8, str.into());
                 self.byte_codes.push(code);
             }
             _ => panic!("不受支持的函数调用形式!"),
         }
-        /* 最后加上调用行为 */
+        //Flag 最后加上调用行为
         self.byte_codes.push(ByteCode::Call(ifunc as u8, 1));
     }
 
@@ -89,28 +89,24 @@ impl ParseProto {
         } else {
             /* 不在locals就代表可能全局常量中 */
             /* 先把var(左值)载入consts表 */
-            let dst = self.add_const(Value::String(var)) as u8;
+            let dst = self.add_const(var) as u8;
             /* 解析变量 -> byte_code */
+
             let code = match self.lex.next() {
                 /* 下面的数据都当成常量  */
-                Token::Nil => ByteCode::SetGlobalConst(dst, self.add_const(Value::Nil) as u8),
-                Token::True =>
-                    ByteCode::SetGlobalConst(dst, self.add_const(Value::Boolean(true)) as u8),
-                Token::False =>
-                    ByteCode::SetGlobalConst(dst, self.add_const(Value::Boolean(false)) as u8),
-                Token::Float(float) =>
-                    ByteCode::SetGlobalConst(dst, self.add_const(Value::Float(float)) as u8),
-                Token::Integer(int) =>
-                    ByteCode::SetGlobalConst(dst, self.add_const(Value::Integer(int)) as u8),
-                Token::String(str) =>
-                    ByteCode::SetGlobalConst(dst, self.add_const(Value::String(str)) as u8),
+                Token::Nil => ByteCode::SetGlobalConst(dst, self.add_const(None) as u8),
+                Token::True => ByteCode::SetGlobalConst(dst, self.add_const(true) as u8),
+                Token::False => ByteCode::SetGlobalConst(dst, self.add_const(false) as u8),
+                Token::Float(float) => ByteCode::SetGlobalConst(dst, self.add_const(float) as u8),
+                Token::Integer(int) => ByteCode::SetGlobalConst(dst, self.add_const(int) as u8),
+                Token::String(str) => ByteCode::SetGlobalConst(dst, self.add_const(str) as u8),
                 /* 下面的当成变量  */
                 Token::Name(var_name) => if let Some(i) = self.get_local(&var_name) {
                     // 已有数据 : 重新赋值
                     ByteCode::SetGlobal(dst, i as u8)
                 } else {
                     // 未有数据 : 全局赋值
-                    ByteCode::SetGlobalGlobal(dst, self.add_const(Value::String(var_name)) as u8)
+                    ByteCode::SetGlobalGlobal(dst, self.add_const(var_name) as u8)
                 }
                 /* 语句错误 : */
                 _ => panic!("赋值语法错误 !"),
@@ -153,7 +149,7 @@ impl ParseProto {
                     self.load_const(index, Value::Integer(int as i64))
                 }
             }
-            Token::String(str) => self.load_const(index, Value::String(str)),
+            Token::String(str) => self.load_const(index, str.into()),
             Token::Name(var) => self.load_var(dst, var) /* 当解析出来是变量名的时候,使用load_var */,
             _ => panic!("不受支持的语法类型"),
         };
@@ -178,19 +174,20 @@ impl ParseProto {
             ByteCode::Move(dst as u8, index as u8) /* 将栈上index的数据作为dst的数据 */
         } else {
             /* 否则,将数据作为全局常量读取常量 */
-            let idx = self.add_const(Value::String(name));
+            let idx = self.add_const(name);
             ByteCode::GetGlobal(dst as u8, idx as u8)
         }
     }
 
     /** 载入Value到常量表 , 并返回常量表中的索引 : 对于已有常量返回已有索引 */
-    fn add_const(&mut self, c: Value) -> usize {
+    fn add_const<I: Into<Value>>(&mut self, v: I) -> usize {
         /* 时间复杂度是O(N^2) --> 后续需要优化为hashMap */
+        let val = v.into();
         return self.constants
             .iter()
-            .position(|v| v == &c)
+            .position(|v| v == &val)
             .unwrap_or_else(|| {
-                self.constants.push(c);
+                self.constants.push(val);
                 self.constants.len() - 1
             });
     }

@@ -1,4 +1,8 @@
-use std::fmt;
+mod table;
+
+use std::{ fmt::{ self }, rc::Rc, cell::RefCell, hash::Hash, mem };
+const SHORT_STR_MAX: usize = 14; // sizeof(一个Value的对齐长度(Value类型的大小是2个字节)) - 1(Enum的tag长度) - 1(用于表示string的len)
+const MID_STR_MAX: usize = 48 - 1; // 48(预估的中等字符串长度,对齐) - 1(用于表示string的len)
 
 use crate::vm;
 /** ### ByteCode表示字节码
@@ -18,19 +22,95 @@ pub enum ByteCode {
     局部变量通过栈索引访问，而全局变量要实时查找全局变量表，也就是Move和GetGlobal这两个字节码的区别 */,
     SetGlobalConst(u8, u8) /* 设置全局常量 : 常量名,常量位置  */,
     SetGlobal(u8, u8) /* 设置全局变量 */,
-    SetGlobalGlobal(u8, u8) /*  */,
+    SetGlobalGlobal(u8, u8) /* 设置全局字面量 */,
 }
 
 /** ### Value表示lua支持的值 */
 #[derive(Clone)]
 pub enum Value {
     Nil /* null */,
-    String(String) /* String */,
     Boolean(bool) /* Boolean */,
     Integer(i64) /* Integer */,
     Float(f64) /* Float */,
     Function(fn(&mut vm::ExeState) -> i32) /* Function */,
+    ShortStr(u8, [u8; SHORT_STR_MAX]) /* 短长度字符串,长度为 SHORT_STR_MAX */,
+    MidStr(Rc<(u8, [u8; MID_STR_MAX])>) /* 中等长度字符串,长度为 MID_STR_MAX */,
+    LongStr(Rc<Vec<u8>>) /* 不限制长度字符串 */,
+    Table(Rc<RefCell<table::Table>>),
 }
+
+/* 实现字符串的自动转换 */
+/* @Key : 如何完成u8到string的转化靠这一步 */
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        return vec_to_short_mid_str(&value).unwrap_or(Value::LongStr(Rc::new(value)));
+    }
+}
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
+        return vec_to_short_mid_str(value).unwrap_or(Value::LongStr(Rc::new(value.to_vec())));
+    }
+}
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        /* 先实现Vec<u8>,再实现String就是顺便的事情 */
+        return value.into_bytes().into();
+    }
+}
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        return Value::Float(value);
+    }
+}
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        return Value::Integer(value);
+    }
+}
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        return Value::Boolean(value);
+    }
+}
+impl From<Option<()>> for Value {
+    fn from(_value: Option<()>) -> Self {
+        return Value::Nil;
+    }
+}
+/** 反向转化,用于vm的的转化 */
+impl From<&Value> for String {
+    fn from(value: &Value) -> Self {
+        /* 将value反向转化成String */
+        return match value {
+            Value::ShortStr(len, buf) => String::from_utf8_lossy(&buf[..*len as usize]).to_string(),
+            /* 抽象中的抽象! &s.1[..s.0 as usize] */
+            Value::MidStr(s) => String::from_utf8_lossy(&s.1[..s.0 as usize]).to_string(),
+            Value::LongStr(s) => String::from_utf8_lossy(&s).to_string(),
+            _ => panic!("不支持的转化类型"),
+        };
+    }
+}
+impl<'a> From<&'a Value> for &'a str {
+    fn from(value: &'a Value) -> Self {
+        return match value {
+            Value::ShortStr(len, buf) => std::str::from_utf8(&buf[..*len as usize]).unwrap(),
+            Value::MidStr(s) => std::str::from_utf8(&s.1[..s.0 as usize]).unwrap(),
+            Value::LongStr(s) => std::str::from_utf8(&s).unwrap(),
+            _ => panic!("不支持的转化类型"),
+        };
+    }
+}
+impl<'a> From<&'a Value> for &'a [u8] {
+    fn from(value: &'a Value) -> Self {
+        match value {
+            Value::ShortStr(len, buf) => &buf[0..*len as usize],
+            Value::MidStr(s) => &s.1[0..s.0 as usize],
+            Value::LongStr(vec8) => vec8,
+            _ => panic!("不受支持的数据类型"),
+        }
+    }
+}
+
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -38,17 +118,48 @@ impl fmt::Debug for Value {
             Value::Boolean(b) => write!(f, "{b}"),
             Value::Integer(i) => write!(f, "{i}"),
             Value::Float(n) => write!(f, "{n:?}"),
-            Value::String(s) => write!(f, "{s}"),
+            Value::Function(_) => write!(f, "function"),
+            Value::ShortStr(len, buf) => {
+                let str = String::from_utf8_lossy(&buf[..*len as usize]).to_string();
+                write!(f, "{str}")
+            }
+            Value::MidStr(s) => {
+                let str = String::from_utf8_lossy(&s.1[0..s.0 as usize]).to_string();
+                write!(f, "{str}")
+            }
+            Value::LongStr(s) => {
+                let str = String::from_utf8_lossy(s).to_string();
+                write!(f, "{str}")
+            }
+            Value::Table(t) => {
+                let t = t.borrow(); /* borrow获取不可变引用 : 对RefCell 进行解包 */
+                write!(f, "table : len {} - {}", t.array.len(), t.map.len())
+            }
+        }
+    }
+}
+/** 实现Display  - 实现print函数显示效果 */
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Nil => write!(f, "nil"),
+            Value::Boolean(b) => write!(f, "{b}"),
+            Value::Integer(i) => write!(f, "{i}"),
+            Value::Float(n) => write!(f, "{n:?}"),
+            Value::ShortStr(len, buf) =>
+                write!(f, "{}", String::from_utf8_lossy(&buf[..*len as usize])),
+            Value::MidStr(s) => write!(f, "{}", String::from_utf8_lossy(&s.1[..s.0 as usize])),
+            Value::LongStr(s) => write!(f, "{}", String::from_utf8_lossy(&s)),
+            Value::Table(t) => write!(f, "table: {:?}", Rc::as_ptr(t)),
             Value::Function(_) => write!(f, "function"),
         }
     }
 }
-/** 实现Value比较 */
+/** 实现两个Value比较 , 只需要满足自反性的相等即可 */
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Nil, Self::Nil) => true,
-            (Self::String(l0), Self::String(r0)) => *l0 == *r0,
             (Self::Boolean(l0), Self::Boolean(r0)) => *l0 == *r0,
             (Self::Integer(l0), Self::Integer(r0)) => *l0 == *r0,
             (Self::Float(l0), Self::Float(r0)) => *l0 == *r0,
@@ -57,12 +168,54 @@ impl PartialEq for Value {
         }
     }
 }
+/** Eq 主要是告诉Value<自反性、对称性和传递性>的相等,不需要实现fn只需要写好即可 */
+impl Eq for Value {}
+/** 实现Hash ,由于是在原基本类型上进一步包转,所以只要解包然后调用.hash()即可 */
+impl Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        /* return the hash value */
+        return match self {
+            Value::Nil => () /* Nil不能作为table key */,
+            Value::Boolean(b) => b.hash(state),
+            Value::Integer(i) => i.hash(state),
+            Value::Float(f) => unsafe {
+                /* Rust 中的浮点类型 f32 和 f64 都支持 NaN。 然而由于NaN之间是不相等的,所以不同的NaN获取.hash()值不想等,所以不满足hash()的定义(即相同的数据获取的hash值是相等的),因此不实现.hash() */
+                mem::transmute::<f64, i64>(*f).hash(state) /* 进行不安全的类型转化 */
+            }
+            Value::Function(f) => f.hash(state),
+            Value::ShortStr(l, b) => b[0..*l as usize].hash(state),
+            Value::MidStr(s) => s.1[0..s.0 as usize].hash(state),
+            Value::LongStr(v) => v.hash(state),
+            Value::Table(t) =>
+                t
+                    .as_ptr()
+                    .hash(
+                        state
+                    ) /* t.as_ptr() : 将Rc的引用转化为指针,简而言之就是取出指针的值,从而作为Table的hash-key */,
+        };
+    }
+}
+
+/* 短/中长度的字符串转化 */
+fn vec_to_short_mid_str(u8s: &[u8]) -> Option<Value> {
+    let len = u8s.len();
+    if len <= SHORT_STR_MAX {
+        let mut buf = [0; SHORT_STR_MAX];
+        buf[..len].copy_from_slice(u8s);
+        return Some(Value::ShortStr(len as u8, buf));
+    } else if len <= MID_STR_MAX {
+        let mut buf = [0; MID_STR_MAX];
+        buf[..len].copy_from_slice(u8s);
+        return Some(Value::MidStr(Rc::new((len as u8, buf))));
+    }
+    return None;
+}
 
 /** ### Token表示在词法分析中会遇到的字符串情况 */
 #[derive(Debug, PartialEq)]
 pub enum Token {
     Name(String) /* 定义的名 */,
-    String(String) /* 字符串文本 */,
+    String(Vec<u8>) /* 字符串文本: 以Vec<u8>为基准 */,
     Integer(i64) /* int型 */,
     Float(f64) /* float型 */,
     Eos /* 表示文件结束 */,

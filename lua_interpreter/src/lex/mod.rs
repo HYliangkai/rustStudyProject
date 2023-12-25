@@ -1,27 +1,27 @@
-use std::{ fs::File, io::{ Read, SeekFrom, Seek }, mem };
+use std::{ io::{ Read, Bytes }, mem, iter::Peekable };
 
 use crate::interface::Token;
 
 /** 词法解析模块 : 将解析到string 转化成相应的Token */
 #[derive(Debug)]
-pub struct Lex {
-    input: File,
+pub struct Lex<R: Read> {
+    input: Peekable<Bytes<R>> /* 将file变成Bytes以满足迭代需要 */,
     ahead: Token /* 后一个字段 */,
 }
 
-impl Lex {
-    pub fn new(input: File) -> Self {
-        return Lex { input, ahead: Token::Eos };
+impl<R: Read> Lex<R> {
+    pub fn new(input: R) -> Self {
+        return Lex { input: input.bytes().peekable(), ahead: Token::Eos };
     } /* new()基于输入文件创建语法分析器 */
     /* 开始进行词法分析:将文本转换成Token */
     pub fn next(&mut self) -> Token {
         if self.ahead == Token::Eos {
             return self.do_next();
         } else {
+            return mem::replace(&mut self.ahead, Token::Eos);
             //mem::replace(&mut self.ahead, Token::Eos)的作用类同于 Option::take() :
             //将 Token::Eos赋值给self.ahead并且返回self.ahead
             //用于处理peek情况下获取的ahead数据作为next()数据,减少循环次数,增强性能
-            return mem::replace(&mut self.ahead, Token::Eos);
         }
     }
 
@@ -36,75 +36,118 @@ impl Lex {
 
     /** do_next()返回下一个Token */
     fn do_next(&mut self) -> Token {
-        let ch = self.read_char();
-        match ch {
-            '\0' => Token::Eos,
-            ' ' | '\r' | '\n' | '\t' => self.next(),
-            '+' => Token::Add,
-            '*' => Token::Mul,
-            '%' => Token::Mod,
-            '^' => Token::Pow,
-            '#' => Token::Len,
-            '&' => Token::BitAnd,
-            '|' => Token::BitOr,
-            '(' => Token::ParL,
-            ')' => Token::ParR,
-            '{' => Token::CurlyL,
-            '}' => Token::CurlyR,
-            '[' => Token::SqurL,
-            ']' => Token::SqurR,
-            ';' => Token::SemiColon,
-            ',' => Token::Comma,
-            '/' => self.check_ahead('/', Token::Idiv, Token::Div),
-            '=' => self.check_ahead('=', Token::Equal, Token::Assign),
-            '~' => self.check_ahead('=', Token::NotEq, Token::BitXor),
-            ':' => self.check_ahead(':', Token::DoubColon, Token::Colon),
-            '<' => self.check_ahead2('=', Token::LesEq, '<', Token::ShiftL, Token::Less),
-            '>' => self.check_ahead2('=', Token::GreEq, '>', Token::ShiftR, Token::Greater),
-            '\'' | '"' => self.read_string(ch),
-            'A'..='Z' | 'a'..='z' | '_' => self.read_name(ch),
-            '0'..='9' => self.read_number(ch),
-            '.' => self.read_dot(),
-            '-' => self.read_sub(),
-            _ => panic!("语法出错/不支持语法"),
+        /* 直接读取u8 */
+        if let Some(ch) = self.next_byte() {
+            let token = match ch {
+                b'\0' => Token::Eos,
+                b' ' | b'\r' | b'\n' | b'\t' => self.do_next(),
+                b'+' => Token::Add,
+                b'*' => Token::Mul,
+                b'%' => Token::Mod,
+                b'^' => Token::Pow,
+                b'#' => Token::Len,
+                b'&' => Token::BitAnd,
+                b'|' => Token::BitOr,
+                b'(' => Token::ParL,
+                b')' => Token::ParR,
+                b'{' => Token::CurlyL,
+                b'}' => Token::CurlyR,
+                b'[' => Token::SqurL,
+                b']' => Token::SqurR,
+                b';' => Token::SemiColon,
+                b',' => Token::Comma,
+                b'/' => self.check_ahead(b'/', Token::Idiv, Token::Div),
+                b'=' => self.check_ahead(b'=', Token::Equal, Token::Assign),
+                b'~' => self.check_ahead(b'=', Token::NotEq, Token::BitXor),
+                b':' => self.check_ahead(b':', Token::DoubColon, Token::Colon),
+                b'<' => self.check_ahead2(b'=', Token::LesEq, b'<', Token::ShiftL, Token::Less),
+                b'>' => self.check_ahead2(b'=', Token::GreEq, b'>', Token::ShiftR, Token::Greater),
+                b'\'' | b'"' => self.read_string(ch),
+                b'A'..=b'Z' | b'a'..=b'z' | b'_' => self.read_name(ch),
+                b'0'..=b'9' => self.read_number(ch),
+                b'.' => self.read_dot(),
+                b'-' => self.read_sub(),
+                _ => panic!("语法出错/不支持语法"),
+            };
+
+            return token;
+        } else {
+            Token::Eos
         }
     }
 
-    /** 读取一个char */
+    /** 读取一个char : 利用bytes的迭代器特性轻松获取 */
     fn read_char(&mut self) -> char {
-        let mut buf: [u8; 1] = [0];
-        if self.input.by_ref().read(&mut buf).unwrap() == 1 {
-            return buf[0] as char;
-        } else {
-            return '\0';
-        }
+        /* self.input.next() 是消耗型的 */
+        return match self.input.next() {
+            Some(Ok(ch)) => ch as char,
+            Some(_) => panic!("读取到错误字节"),
+            None => '\0',
+        };
     }
 
     /** 读取字符串(单字符串和双字符串) */
-    fn read_string(&mut self, quote: char) -> Token {
-        let mut s = String::new();
+    fn read_string(&mut self, quote: u8) -> Token {
+        let mut s = Vec::new();
         loop {
-            match self.read_char() {
-                '\n' | '\0' => panic!("string 未完成"),
-                '\\' => todo!("escape"),
-                ch if ch == quote => {
-                    break;
+            match self.next_byte().expect("string 读取错误") {
+                b'\n' => panic!("string 未完成"),
+                b'\\' => s.push(self.read_escape()),
+                byt if byt == quote => {
+                    /* 字符串中止 */ break;
                 }
-                ch => s.push(ch),
+                byt => s.push(byt),
             }
         }
         return Token::String(s);
     }
 
-    /** 读取变量名 和 关键字 */
-    fn read_name(&mut self, first: char) -> Token {
-        let mut s = first.to_string();
+    /** 读取转义字符 */
+    fn read_escape(&mut self) -> u8 {
+        match self.next_byte().expect("转义失败") {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'v' => 0x0b,
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'\'' => b'\'',
+            b'x' => {
+                // format: \xXX
+                let n1 = char::to_digit(self.next_byte().unwrap() as char, 16).unwrap();
+                let n2 = char::to_digit(self.next_byte().unwrap() as char, 16).unwrap();
+                (n1 * 16 + n2) as u8
+            }
+            ch @ b'0'..=b'9' => {
+                // format: \d[d[d]]
+                let mut n = char::to_digit(ch as char, 10).unwrap(); // TODO no unwrap
+                if let Some(d) = char::to_digit(self.peek_byte() as char, 10) {
+                    self.next_byte();
+                    n = n * 10 + d;
+                    if let Some(d) = char::to_digit(self.peek_byte() as char, 10) {
+                        self.next_byte();
+                        n = n * 10 + d;
+                    }
+                }
+                u8::try_from(n).expect("decimal escape too large")
+            }
+            _ => panic!("未识别的转义字符"),
+        }
+    }
+
+    /** 读取变量名 和 关键字 必须是char格式数据 */
+    fn read_name(&mut self, first: u8) -> Token {
+        let mut s = String::new();
+        s.push(first as char); /* 变量名 */
         loop {
-            let ch = self.read_char();
+            let ch = self.peek_byte() as char;
             if ch.is_alphanumeric() || ch == '_' {
+                self.next_byte();
                 s.push(ch);
             } else {
-                self.putback_char();
                 break;
             }
         }
@@ -139,36 +182,34 @@ impl Lex {
     }
 
     /** 读取数字 */
-    fn read_number(&mut self, num: char) -> Token {
+    fn read_number(&mut self, num: u8) -> Token {
         /* 0开头可能是16进制数字 */
-        if num == '0' {
-            let second = self.read_char();
-            if second == 'x' || second == 'X' {
+        if num == b'0' {
+            let second = self.peek_byte();
+            if second == b'x' || second == b'X' {
                 return self.read_heximal();
             }
         }
         /* 不是16进制继往下走 */
-        let mut n = char::to_digit(num, 10).unwrap() as i64; /* 默认是i64 */
+        let mut n = (num - b'0') as i64; /* 进行类型转化 */
         loop {
-            let ch = self.read_char();
-            if let Some(x) = char::to_digit(ch, 10) {
-                /* 原来的数乘10再加到各位 */
+            let ch = self.peek_byte();
+            if let Some(x) = char::to_digit(ch as char, 10) {
+                self.next_byte(); /* 原来的数乘10再加到个位上 */
                 n = n * 10 + (x as i64);
-            } else if ch == '.' {
-                /* 解析小数值 */ return self.read_number_fraction(n);
-            } else if ch == 'e' || ch == 'E' {
-                /* 解析科学计数法 */ return self.read_number_exp(n as f64);
+            } else if ch == b'.' {
+                return self.read_number_fraction(n); /* 解析小数值 */
+            } else if ch == b'e' || ch == b'E' {
+                return self.read_number_exp(n as f64); /* 解析科学计数法 */
             } else {
-                /* 解析结束 */ self.putback_char();
-                break;
+                break; /* 解析结束 */
             }
         }
+
         /* 处理Integer情况 */
-        let fch = self.read_char();
+        let fch = self.peek_byte() as char;
         if fch.is_alphabetic() || fch == '.' {
             panic!("数字格式不合法!");
-        } else {
-            self.putback_char();
         }
         return Token::Integer(n);
     }
@@ -178,12 +219,12 @@ impl Lex {
         let mut n: i64 = 0;
         let mut f: f64 = 1.0;
         loop {
-            let ch = self.read_char();
+            let ch = self.peek_byte() as char;
             if let Some(d) = char::to_digit(ch, 10) {
+                self.next_byte();
                 n = n * 10 + (d as i64);
                 f = f * 10.0;
             } else {
-                self.putback_char();
                 break;
             }
         }
@@ -193,11 +234,11 @@ impl Lex {
     fn read_heximal(&mut self) -> Token {
         let mut hex_string = String::new();
         loop {
-            let ch = self.read_char();
+            let ch = self.peek_byte() as char;
             if let Some(_) = char::to_digit(ch, 10) {
                 hex_string.push(ch);
+                self.next_byte();
             } else {
-                self.putback_char();
                 break;
             }
         }
@@ -211,11 +252,11 @@ impl Lex {
     }
     /** 读取减号 */
     fn read_sub(&mut self) -> Token {
-        if self.read_char() == '-' {
+        if self.peek_byte() == b'-' {
+            self.next_byte();
             self.read_comment();
             return self.next();
         } else {
-            self.putback_char();
             return Token::Sub;
         }
     }
@@ -234,11 +275,11 @@ impl Lex {
         }
     }
     /** 判断下一个char是否达预期,如果是返回long,如果不是返回short,并且不进行步进 */
-    fn check_ahead(&mut self, ahear: char, long: Token, short: Token) -> Token {
-        if self.read_char() == ahear {
+    fn check_ahead(&mut self, ahear: u8, long: Token, short: Token) -> Token {
+        if self.peek_byte() == ahear {
+            self.next_byte();
             long
         } else {
-            self.putback_char();
             short
         }
     }
@@ -246,45 +287,68 @@ impl Lex {
     fn read_dot(&mut self) -> Token {
         match self.read_char() {
             '.' => {
-                if self.read_char() == '.' {
-                    /* 三个省略号 */ return Token::Dots;
+                if self.peek_byte() == b'.' {
+                    self.next_byte();
+                    return Token::Dots; /* 三个省略号 */
                 } else {
-                    /* 两个省略号 */ self.putback_char();
-                    return Token::Concat;
+                    return Token::Concat; /* 两个省略号 */
                 }
             }
             '0'..='9' => {
-                /* 小数点 */ self.putback_char();
-                return self.read_number_fraction(0);
+                return self.read_number_fraction(0); /* 小数点 */
             }
             _ => {
-                /* 单纯句号 */ self.putback_char();
-                return Token::Dot;
+                return Token::Dot; /* 单纯句号 */
             }
         }
     }
-    /** 二级check_ahead,因为可能可能要读取两次] */
+    /** 二级check_ahead,因为可能可能要读取两次 */
     fn check_ahead2(
         &mut self,
-        ahead1: char,
+        ahead1: u8,
         long1: Token,
-        ahead2: char,
+        ahead2: u8,
         long2: Token,
         short: Token
     ) -> Token {
-        let ch = self.read_char();
+        let ch = self.peek_byte();
         if ch == ahead1 {
+            self.next_byte();
             long1
         } else if ch == ahead2 {
+            self.next_byte();
             long2
         } else {
-            self.putback_char();
             short
         }
     }
 
     /** 文件读取回溯,用于read_char消费char的反悔 */
-    fn putback_char(&mut self) {
-        self.input.seek(SeekFrom::Current(-1)).unwrap();
+    // fn putback_char(&mut self) {
+    //     self.input.seek(SeekFrom::Current(-1)).unwrap();
+    // }
+
+    /**  */
+    fn _peek_char(&mut self) -> char {
+        /* self.input.peek() 是非消耗型的 */
+        return match self.input.peek() {
+            Some(Ok(c)) => *c as char,
+            Some(_) => panic!("错误的类型引用"),
+            None => '\0',
+        };
+    }
+
+    /** peek look a byte */
+    fn peek_byte(&mut self) -> u8 {
+        return match self.input.peek() {
+            Some(Ok(byt)) => *byt,
+            Some(_) => panic!("lex peek error"),
+            None => b'\0', // good for usage
+        };
+    }
+
+    /** read next byte  in consume */
+    fn next_byte(&mut self) -> Option<u8> {
+        return self.input.next().and_then(|it| Some(it.unwrap()));
     }
 }

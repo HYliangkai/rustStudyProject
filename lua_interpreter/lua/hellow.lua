@@ -1,14 +1,8 @@
 local a = 456
-a = 123
+a = '你好'
 print(a)
-a = a
-print(a)
-a = g
-print(a)
-g = 123
-print(g)
-g = a
-print(g)
-g = g2
-print(g)
+print "\xE4\xBD\xA0\xE5\xA5\xBD"
+print("null: \n 我去")
 
+local A = "dmocv"
+print(A)
