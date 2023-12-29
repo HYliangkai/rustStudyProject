@@ -549,3 +549,89 @@ pub enum ByteCode {
 ```
 
 不过中间的两个字节码并不支持值是常量的情况，只支持栈上索引。我们在后面小节会加入对常量的优化。
+
+
+## 基于栈或基于寄存器的VM
+
+通过栈顶来操作参数的方式，称为**基于栈**的虚拟机。很多脚本语言如Java、Python等的虚拟机都是基于栈的。而在字节码中直接索引参数的方式（比如`SetTable 2 0 1`），称为**基于寄存器**的虚拟机。这里的“寄存器”并不是计算机CPU中的寄存器，而是一个虚拟的概念，比如在我们的Lua解释器中，就是用栈和常量表来实现的寄存器。Lua是第一个（官方的虚拟机）基于寄存器的主流语言。
+
+
+
+基于寄存器的虚拟机需要一种新类型来保存中间结果。为此我们引入`ExpDesc`（名字来自Lua官方实现代码）：
+
+```rust,ignore
+#[derive(Debug, PartialEq)]
+enum ExpDesc {
+    Nil,
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    String(Vec<u8>),
+    Local(usize), // on stack, including local and temprary variables
+    Global(usize), // global variable
+}
+```
+
+现在看上去其类型，就是表达式目前支持的类型，只是把`Token::Name`拆成了`Local`和`Global`，为此引入这个类型有点小题大做。但在下一节支持表的读写时，以及后续的运算表达式、条件跳转等语句时，ExpDesc就会大显身手！
+
+原来的解析过程是从Token直接生成字节码：
+
+```
+    Token::Integer  ->  ByteCode::LoadInt
+    Token::String   ->  ByteCode::LoadConst
+    Token::Name     ->  ByteCode::Move | ByteCode::GetGlobal
+    ...
+```
+
+现在中间增加了ExpDesc这层，解析过程就变成：
+
+```
+    Token::Integer  ->  ExpDesc::Integer  ->  ByteCode::LoadInt
+    Token::String   ->  ExpDesc::String   ->  ByteCode::LoadConst
+    Token::Name     ->  ExpDesc::Local    ->  ByteCode::Move
+    Token::Name     ->  ExpDesc::Global   ->  ByteCode::GetGlobal
+    ...
+```
+
+## ExpDesc
+
+ExpDesc是非常重要的，这里换个角度再介绍一次。
+
+[第1.1节](./ch01-01.principles.md)基础的编译原理中介绍了通用的编译流程：
+
+```
+       词法分析           语法分析         语义分析
+字符流 --------> Token流 --------> 语法树 --------> 中间代码 ...
+```
+
+我们仍然用上面的加法代码来举例：
+
+```lua
+local r
+local a = 1
+local b = 2
+r = a + b
+```
+
+按照上述通用编译流程，对于最后一行的加法语句，语法分析会得到语法树：
+
+```
+    |
+    V
+    +
+   / \
+  a   b
+```
+
+然后在语义分析时，先看到`+`，得知这是一条加法的语句，于是可以很直接地生成字节码：`Add ? 1 2`。其中`?`是加法的目标地址，由赋值语句处理，这里忽略；`1`和`2`分别是两个加数的栈索引。
+
+但我们目前的做法，也是Lua官方实现的做法，是省略了“语义分析”这一步，从语法分析直接生成中间代码，边分析边生成代码。那么在语法分析时，就不能像上述语义分析那样有全局的视角。比如对于加法语句`a+b`，在读到`a`时，还不知道这是一条加法语句，只能先存起来。读到`+`时才确定是加法语句，然后再读第二个加数，然后生成字节码。我们为此引入了`ExpDesc`这个中间层。所以ExpDesc就相当于是通用流程中的“语法树”的作用。只不过语法树是全局的，而ExpDesc是局部的，而且是最小粒度的局部。
+
+```
+       词法分析               语法分析
+字符流 --------> Token流 ----(ExpDesc)---> 中间代码 ...
+```
+
+可以直观地看到，Lua的这种方式省去了语义分析步骤，速度应该略快，但由于没有全局视角，所以实现相对复杂。这两种方式更详细的说明和对比已经超出了本文的讨论范围。我们选择按照Lua官方实现的方式，选择语法分析直接生成字节码的方式。
+
+#### 简单来说ExpDesc就是一个局部的AST

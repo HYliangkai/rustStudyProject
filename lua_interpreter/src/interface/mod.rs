@@ -1,10 +1,17 @@
-mod table;
+pub mod table;
 
 use std::{ fmt::{ self }, rc::Rc, cell::RefCell, hash::Hash, mem };
 const SHORT_STR_MAX: usize = 14; // sizeof(一个Value的对齐长度(Value类型的大小是2个字节)) - 1(Enum的tag长度) - 1(用于表示string的len)
 const MID_STR_MAX: usize = 48 - 1; // 48(预估的中等字符串长度,对齐) - 1(用于表示string的len)
 
 use crate::vm;
+
+/** 用于区分是constant取值操作还是stack取值 */
+pub enum ConstStack {
+    Const(usize),
+    Stack(usize),
+}
+
 /** ### ByteCode表示字节码
     不同的字节码表示vm在解析的时候会采取不同的方式来进行解释执行
     
@@ -12,17 +19,25 @@ use crate::vm;
  */
 #[derive(Debug)]
 pub enum ByteCode {
-    GetGlobal(u8, u8) /* <获取>装载好的全局变量/函数 : 入栈位置,变量名在constants的index   */,
-    LoadConst(u8, u8) /* <存储>全局变量 : 入栈位置,变量名在constants的index */,
+    GetGlobal(u8, u8) /* <获取>装载好的全局变量/函数 : 入栈位置|变量名在constants的index   */,
+    LoadConst(u8, u8) /* <存储>全局变量 : 入栈位置|变量名在constants的index */,
     LoadNil(u8) /* 存储nil : 入栈位置 */,
-    LoadBool(u8, bool) /* 存储boolean : 入栈位置,bool情况 */,
-    LoadInt(u8, i64) /* 存储int : 入栈位置,int情况 */,
-    Call(u8, u8) /* 函数调用 : 函数在栈的位置,参数个数 */,
-    Move(u8, u8) /* 数据移动,表示数据从调用栈(后)移向(前)进行替代的行为 
-    局部变量通过栈索引访问，而全局变量要实时查找全局变量表，也就是Move和GetGlobal这两个字节码的区别 */,
-    SetGlobalConst(u8, u8) /* 设置全局常量 : 常量名,常量位置  */,
-    SetGlobal(u8, u8) /* 设置全局变量 */,
+    LoadBool(u8, bool) /* 存储boolean : 入栈位置|bool情况 */,
+    LoadInt(u8, i64) /* 存储int : 入栈位置|int情况 */,
+    Call(u8, u8) /* 函数调用 : 函数在栈的位置|参数个数 */,
+    Move(u8, u8) /* 数据移动,表示数据从调用栈(后)|移向(前)进行替代的行为 
+    局部变量通过栈索引访问，而全局变量要实时查找全局变量表，也 就是Move和GetGlobal这两个字节码的区别 */,
+    SetGlobalConst(u8, u8) /* 设置全局常量 : 常量名|常量位置 */,
+    SetGlobal(u8, u8) /* 设置全局变量 : 常量位置|入栈位置  */,
     SetGlobalGlobal(u8, u8) /* 设置全局字面量 */,
+    NewTable(u8, u8, u8) /* 新建一个table : 入栈位置|数组部分长度|Hash部分长度  */,
+    SetTable(u8, u8, u8) /* <栈> 获取数据生成table : table入栈位置|key|value  */,
+    SetField(u8, u8, u8) /* <栈> 设置字符串常量 : table入栈位置|key|value  */,
+    SetInt(u8, u8, u8) /* <栈> 设置字符串常量 : table入栈位置|key|value */,
+    SetTableConst(u8, u8, u8) /* <常量表> 获取数据生成table : table入栈位置|key|value  */,
+    SetFieldConst(u8, u8, u8) /* <常量表> 设置字符串常量 : table入栈位置|key|value   */,
+    SetIntConst(u8, u8, u8) /* <常量表> 设置字符串常量 : table入栈位置|key|value */,
+    SetList(u8, u8) /* 把array插入到table上 : table入栈位置|array长度  */,
 }
 
 /** ### Value表示lua支持的值 */
@@ -36,11 +51,11 @@ pub enum Value {
     ShortStr(u8, [u8; SHORT_STR_MAX]) /* 短长度字符串,长度为 SHORT_STR_MAX */,
     MidStr(Rc<(u8, [u8; MID_STR_MAX])>) /* 中等长度字符串,长度为 MID_STR_MAX */,
     LongStr(Rc<Vec<u8>>) /* 不限制长度字符串 */,
-    Table(Rc<RefCell<table::Table>>),
+    Table(Rc<RefCell<table::Table>>) /* Table */,
 }
 
 /* 实现字符串的自动转换 */
-/* @Key : 如何完成u8到string的转化靠这一步 */
+/* @Key : how to  u8 change String */
 impl From<Vec<u8>> for Value {
     fn from(value: Vec<u8>) -> Self {
         return vec_to_short_mid_str(&value).unwrap_or(Value::LongStr(Rc::new(value)));

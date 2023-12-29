@@ -13,7 +13,8 @@ impl<R: Read> Lex<R> {
     pub fn new(input: R) -> Self {
         return Lex { input: input.bytes().peekable(), ahead: Token::Eos };
     } /* new()基于输入文件创建语法分析器 */
-    /* 开始进行词法分析:将文本转换成Token */
+
+    /* 返回下一个Token,并且进行移动 */
     pub fn next(&mut self) -> Token {
         if self.ahead == Token::Eos {
             return self.do_next();
@@ -179,6 +180,11 @@ impl<R: Read> Lex<R> {
             "while" => Token::While,
             _ => Token::Name(s),
         }
+    }
+
+    /** 判断下一个Token是否预期,否则panic */
+    pub fn expect(&mut self, token: Token) {
+        assert_eq!(self.next(), token)
     }
 
     /** 读取数字 */

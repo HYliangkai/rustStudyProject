@@ -6,3 +6,6 @@ print("null: \n 我去")
 
 local A = "dmocv"
 print(A)
+
+local tb = {}
+tb['name'] = 'jiojio'

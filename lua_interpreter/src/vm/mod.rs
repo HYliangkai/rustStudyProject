@@ -1,6 +1,5 @@
-use std::{ collections::HashMap, cmp::Ordering, io::Read };
-
-use crate::{ interface::{ Value, ByteCode }, global::lib_print, parse::ParseProto };
+use std::{ collections::HashMap, cmp::Ordering, io::Read, rc::Rc, cell::RefCell };
+use crate::{ interface::{ Value, ByteCode, table::Table }, global::lib_print, parse::ParseProto };
 
 /** ## Lua虚拟机 */
 pub struct ExeState {
@@ -91,11 +90,49 @@ impl ExeState {
                     let value = self.globals.get(src).unwrap_or(&Value::Nil).clone();
                     self.globals.insert(name, value);
                 }
-                // _ => panic!("暂时不支持更多字节码"),
+                ByteCode::NewTable(idx, al, ml) => {
+                    let table = Value::Table(
+                        Rc::new(RefCell::new(Table::new(al as usize, ml as usize)))
+                    );
+                    self.set_stack(idx, table);
+                }
+                ByteCode::SetTable(idx, key, value) => {
+                    let key = self.stack[key as usize].clone();
+                    let value = self.stack[value as usize].clone();
+                    //取出table进行insert
+                    if let Value::Table(table) = &self.stack[idx as usize] {
+                        table.borrow_mut().map.insert(key, value);
+                    } else {
+                        panic!("table in stack is error place");
+                    }
+                }
+                ByteCode::SetField(idx, key, value) => {
+                    let key = proto.constants[key as usize].clone();
+                    let value = self.stack[value as usize].clone();
+                    if let Value::Table(table) = &self.stack[idx as usize] {
+                        table.borrow_mut().map.insert(key, value);
+                    } else {
+                        panic!("table in stack is error place");
+                    }
+                }
+                ByteCode::SetList(idx, arr_len) => {
+                    let ivalue = (idx as usize) + 1;
+                    let value = self.stack[idx as usize].clone();
+                    if let Value::Table(table) = value {
+                        /* 取出  ivalue ~ ivalue + arr_len 的数据并且获得可变引用 */
+                        let values = self.stack.drain(ivalue..ivalue + (arr_len as usize));
+                        table.borrow_mut().array.extend(values);
+                    } else {
+                        panic!("table in stack is error place");
+                    }
+                }
+                _ => panic!("暂时不支持更多字节码"),
             }
         }
     }
-    /** 入栈,进行位置覆盖 : 在 stack的dst位置载入Value */
+
+    /** ### 入栈操作,进行位置覆盖 : 
+    在 stack的dst位置载入Value */
     fn set_stack(&mut self, dst: u8, v: Value) {
         let dst = dst as usize;
         match dst.cmp(&self.stack.len()) {

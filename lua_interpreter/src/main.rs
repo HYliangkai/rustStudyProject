@@ -6,6 +6,7 @@ mod lex;
 mod global;
 mod parse;
 mod interface;
+mod exp_desc;
 
 /** 程序入口,接受一个lua文件地址,然后解释执行 */
 fn main() {
