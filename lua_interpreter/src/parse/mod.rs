@@ -275,13 +275,13 @@ impl<R: Read> ParseProto<R> {
             });
     }
 
-    /** Next Token -> ExpDesc :: 提供一个中间转化蕴含多项操作的办法 */
+    /** Next Token -> ExpDesc */
     fn exp(&mut self) -> ExpDesc {
         let token = self.lex.next();
         self.exp_with_ahead(token)
     }
 
-    /* The Token  -> ExpDesc */
+    /** Any Token -> ExpDesc */
     fn exp_with_ahead(&mut self, token: Token) -> ExpDesc {
         return match token {
             Token::Nil => ExpDesc::Nil,
@@ -294,11 +294,51 @@ impl<R: Read> ParseProto<R> {
             Token::CurlyL => self.table_constructor(),
             Token::Sub | Token::Not | Token::BitXor | Token::Len => todo!("unop"),
             Token::Dots => todo!("dots"),
-            t => self.prefixexp(t),
+            t => self.prefixexp(t) /* Name | SqurL | SqurR */,
         };
     }
-    /* 进一步解析: token->ExpDesc */
+
+    /* 消除左递归的value解析 */
     fn prefixexp(&mut self, token: Token) -> ExpDesc {
+        let idx = self.sp;
+        let mut desc_code = match token {
+            Token::Name(name) => self.simple_name(name) /* parse the name */,
+            Token::SqurL => {
+                let desc = self.exp(); /* 这里使用递归调用获取exp */
+                self.lex.expect(Token::SqurR); /* consume ']'  */
+                desc
+            }
+
+            _ => panic!("var 解析失败"),
+        };
+        // [key] = value
+        loop {
+            match self.lex.peek() {
+                Token::SqurL => {
+                    // [ exp ]
+                    self.lex.next();
+                    let itable = self.discharge_if_need(idx, desc_code);
+                    desc_code = match self.exp() {
+                        ExpDesc::String(s) => ExpDesc::IndexField(itable, self.add_const(s)),
+                        ExpDesc::Integer(i) if u8::try_from(i).is_ok() =>
+                            ExpDesc::IndexInt(itable, u8::try_from(i).unwrap()),
+                        key => ExpDesc::Index(itable, self.discharge_top(key)),
+                    };
+                }
+                Token::Dot => {
+                    // .name
+                    self.lex.next();
+                    let name = self.read_name();
+                    let itable = self.discharge_if_need(idx, desc_code);
+                    desc_code = ExpDesc::IndexField(itable, self.add_const(name));
+                }
+                Token::SqurL => {}
+
+                _ => {
+                    return desc_code; /* direct return desc */
+                }
+            }
+        }
         todo!()
     }
 
@@ -342,6 +382,7 @@ impl<R: Read> ParseProto<R> {
                 //Global表示数据从常量表中获取
                 ByteCode::GetGlobal(dst as u8, g as u8)
             }
+            _ => panic!("暂时不支持更多ExpDesc"),
         };
         self.byte_codes.push(code);
         self.sp += 1;

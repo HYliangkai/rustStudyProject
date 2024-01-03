@@ -1,5 +1,5 @@
 /** ### ExpDesc : temp ast  */
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ExpDesc {
     Nil,
     Boolean(bool),
@@ -8,6 +8,7 @@ pub enum ExpDesc {
     String(Vec<u8>) /* 字符串 */,
     Local(usize) /* 临时变量 */,
     Global(usize) /* 全局变量 */,
+    Index(usize, usize),
+    IndexField(usize, usize),
+    IndexInt(usize, u8),
 }
-
-
